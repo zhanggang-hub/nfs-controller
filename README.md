@@ -1,0 +1,2 @@
+1)需要有一个静态创建pv的storageclass,controller会自动创建关联pv和pvc
+2)nfs mount失败后会驱逐node节点的pod,在恢复挂载1分钟后会停止驱逐
