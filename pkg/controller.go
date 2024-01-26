@@ -22,6 +22,8 @@ import (
 	"time"
 )
 
+var count int
+
 type controller struct {
 	client  *kubernetes.Clientset
 	dslist  appslist.DaemonSetLister
@@ -96,7 +98,7 @@ func (c *controller) pvcreate() *core.PersistentVolume {
 		Capacity: map[core.ResourceName]resource.Quantity{
 			core.ResourceStorage: resourceQuantityFromStr("1"),
 		},
-		MountOptions:                  []string{"soft", "intr", "timeo=2", "retry=5"},
+		MountOptions:                  []string{"soft", "intr", "timeo=2", "retry=2"},
 		PersistentVolumeReclaimPolicy: "Retain",
 		StorageClassName:              "nfs-pro-class",
 		AccessModes: []core.PersistentVolumeAccessMode{
@@ -104,8 +106,8 @@ func (c *controller) pvcreate() *core.PersistentVolume {
 		},
 		PersistentVolumeSource: core.PersistentVolumeSource{
 			NFS: &core.NFSVolumeSource{
-				Path:   "/data11",
-				Server: "192.168.40.130",
+				Path:   "/data/nfsdata",
+				Server: "10.182.0.xx",
 			},
 		},
 	}
@@ -166,7 +168,7 @@ func (c *controller) nfsdscreate() *apps.DaemonSet {
 								{
 									MatchExpressions: []core.NodeSelectorRequirement{
 										{
-											Key:      "node-role.kubernetes.io/control-plane",
+											Key:      "node-role.kubernetes.io/node",
 											Operator: "Exists",
 										},
 									},
@@ -182,7 +184,7 @@ func (c *controller) nfsdscreate() *apps.DaemonSet {
 						Command: []string{
 							"sh",
 							"-c",
-							"while true;do date > /data/nfs-test/test.txt;if [ ! -f '/data/nfs-test/test.txt' ];then exit 1;break;fi;done",
+							"while true;do for i in {1..10};do echo $i > /data/nfs-test/test.txt && sleep 1;if [ $? -eq 1 ];then exit 1;fi;done;done",
 						},
 						VolumeMounts: []core.VolumeMount{
 							{
@@ -261,13 +263,13 @@ func (c *controller) syncnfs(key string) ([]string, error) {
 					return nil, err
 				}
 				fmt.Println("节点污点更新添加成功")
+				count++
 				return nil, nil
 			} else if nodetaint != nil {
 				for _, i := range nodetaint {
 					if i.Effect == "NoExecute" {
 						return nil, nil
 					} else if i.Key == "nfs-client-mount-error" {
-						//有污点返回ns切片进行处理
 						return nil, nil
 					}
 				}
@@ -278,6 +280,7 @@ func (c *controller) syncnfs(key string) ([]string, error) {
 					return nil, err
 				}
 				fmt.Println("节点污点更新添加成功")
+				count++
 				return nil, nil
 			}
 
@@ -315,6 +318,7 @@ func (c *controller) checknode(ns []string) {
 					log.Println("node更新失败")
 					return
 				}
+				count--
 				fmt.Println("节点污点更新去除成功")
 
 			} else if o.Key == "nfs-client-mount-error" && len(nodetaint) == 1 {
@@ -324,6 +328,7 @@ func (c *controller) checknode(ns []string) {
 					log.Println("node更新失败")
 					return
 				}
+				count--
 				fmt.Println("节点污点更新去除成功")
 			} else if len(nodetaint) == 0 {
 				return
@@ -359,6 +364,9 @@ func (c *controller) process() bool {
 	}
 	defer c.queue.Done(item)
 	key := item.(string)
+	if count == 1 {
+		return false
+	}
 	ns, err := c.syncnfs(key)
 	if err != nil {
 		c.handleerr(key, err)
