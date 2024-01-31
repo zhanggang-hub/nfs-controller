@@ -8,6 +8,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	dsinformer "k8s.io/client-go/informers/apps/v1"
@@ -24,12 +25,12 @@ import (
 )
 
 var count int
-var bspods []*core.Pod
 
 type controller struct {
 	client  *kubernetes.Clientset
 	dslist  appslist.DaemonSetLister
 	podlist corelist.PodLister
+	nslist  corelist.NamespaceLister
 	queue   workqueue.RateLimitingInterface
 }
 
@@ -212,21 +213,24 @@ func (c *controller) nfsdscreate() *apps.DaemonSet {
 	return &ds
 }
 
-func (c *controller) syncnfs(key string) ([]string, error) {
+func (c *controller) syncnfs(key string) ([]string, *core.Pod, error) {
 	//是否大于一半的节点数
 	nodelist, err := c.client.CoreV1().Nodes().List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		log.Println(err)
-		return nil, err
+		return nil, nil, err
 	}
 	if count > len(nodelist.Items)/2 {
 		log.Println("nfs宕机节点过多 需要进行自动切换")
-		return nil, nil
+		//return nil, nil
 	}
 	namespace, name, err := cache.SplitMetaNamespaceKey(key)
 	if err != nil {
 		log.Println(err)
-		return nil, err
+		return nil, nil, err
+	}
+	if namespace != "nfs-watch" {
+		return nil, nil, err
 	}
 	ns := []string{namespace, name}
 	//ds副本数
@@ -238,83 +242,96 @@ func (c *controller) syncnfs(key string) ([]string, error) {
 	//}
 	//pod内容器变化
 
-	if namespace == "nfs-watch" {
-		return nil, nil
-	}
 	podget, err := c.podlist.Pods(namespace).Get(name)
 	if errors.IsNotFound(err) {
 		log.Println(err)
-		return nil, err
+		return nil, nil, err
 	}
 	_, ok := podget.GetAnnotations()["nfs-node-watch"]
-	_, ok2 := podget.GetAnnotations()["nfs-check"]
+
 	phase := podget.Status.Phase
-	if ok2 {
-		if phase == "Running" {
-			bspods = append(bspods, podget)
-			return nil, nil
-		}
-	} else if ok {
+	if ok {
 		if phase == "Running" {
 			containerready := podget.Status.ContainerStatuses[0].Ready
 			if !containerready {
-				for i, bspod := range bspods {
-					if bspod.Spec.NodeName == podget.Spec.NodeName {
-						nodes, err := c.client.CoreV1().Nodes().Get(context.TODO(), podget.Spec.NodeName, metav1.GetOptions{})
-						if err != nil {
-							log.Println(err)
-							return nil, err
+				nodes, err := c.client.CoreV1().Nodes().Get(context.TODO(), podget.Spec.NodeName, metav1.GetOptions{})
+				if err != nil {
+					log.Println(err)
+					return nil, nil, err
+				}
+				taint := &core.Taint{
+					Key:    "nfs-client-mount-error",   // 污点的键，可以根据需要进行自定义设置
+					Value:  "true",                     // 污点的值，可以根据需要进行自定义设置
+					Effect: core.TaintEffectNoSchedule, // 设置污点效果为NoSchedule，可以根据需要进行自定义设置其他效果，如Evict（驱逐）等。
+				}
+				//检测节点是否有驱逐污点,节点没污点直接打污点，有污点的话进行判断
+				nodetaint := nodes.Spec.Taints
+
+				if nodetaint == nil {
+					nodes.Spec.Taints = append(nodetaint, *taint)
+					_, err = c.client.CoreV1().Nodes().Update(context.TODO(), nodes, metav1.UpdateOptions{})
+					if err != nil {
+						log.Println(err)
+						return nil, nil, err
+					}
+					fmt.Printf("%v 污点已添加\n", nodes.Name)
+					count++
+					return nil, podget, nil
+
+				} else if nodetaint != nil {
+					for _, o := range nodetaint {
+						if o.Key == "nfs-client-mount-error" {
+							return nil, nil, nil
 						}
-						taint := &core.Taint{
-							Key:    "nfs-client-mount-error",   // 污点的键，可以根据需要进行自定义设置
-							Value:  "true",                     // 污点的值，可以根据需要进行自定义设置
-							Effect: core.TaintEffectNoSchedule, // 设置污点效果为NoSchedule，可以根据需要进行自定义设置其他效果，如Evict（驱逐）等。
-						}
-						//检测节点是否有驱逐污点,节点没污点直接打污点，有污点的话进行判断
-						nodetaint := nodes.Spec.Taints
-						if nodetaint == nil {
-							nodes.Spec.Taints = append(nodetaint, *taint)
-							_, err = c.client.CoreV1().Nodes().Update(context.TODO(), nodes, metav1.UpdateOptions{})
-							if err != nil {
-								log.Println(err)
-								return nil, err
-							}
-							c.client.CoreV1().Pods(namespace).Delete(context.TODO(), name, metav1.DeleteOptions{})
-							if err != nil {
-								log.Println(err)
-								return nil, err
-							}
-							count++
-						} else if nodetaint != nil {
-							for _, i := range nodetaint {
-								if i.Key == "nfs-client-mount-error" {
-									return nil, nil
-								}
-							}
-							nodes.Spec.Taints = append(nodetaint, *taint)
-							_, err = c.client.CoreV1().Nodes().Update(context.TODO(), nodes, metav1.UpdateOptions{})
-							if err != nil {
-								log.Println(err)
-								return nil, err
-							}
-							c.client.CoreV1().Pods(namespace).Delete(context.TODO(), name, metav1.DeleteOptions{})
-							if err != nil {
-								log.Println(err)
-								return nil, err
-							}
-							count++
-						}
-						newbspods := append(bspods[:i], bspods[i:]...)
-						bspods = newbspods
+					}
+					nodes.Spec.Taints = append(nodetaint, *taint)
+					_, err = c.client.CoreV1().Nodes().Update(context.TODO(), nodes, metav1.UpdateOptions{})
+					if err != nil {
+						log.Println(err)
+						return nil, nil, err
 					}
 				}
-			} else if containerready {
-				return ns, err
+				fmt.Printf("%v 污点已添加\n", nodes.Name)
+				count++
+				return nil, podget, nil
+			} else if containerready && podget.Status.ContainerStatuses[0].RestartCount > 0 {
+				return ns, nil, err
+			} else if containerready && podget.Status.ContainerStatuses[0].RestartCount == 0 {
+				fmt.Printf("%v %v pod已重建或首次读取pod信息\n", namespace, name)
+				return ns, nil, err
 			}
 		}
 	}
 
-	return nil, nil
+	return nil, nil, nil
+}
+func (c *controller) syncbspod(nfspod *core.Pod) {
+	allns, err := c.nslist.List(labels.Everything())
+	if err != nil {
+		log.Println(err)
+		return
+	}
+	for _, ns := range allns {
+		allpods, err := c.podlist.Pods(ns.Name).List(labels.Everything())
+		if err != nil {
+			log.Println(err)
+			return
+		}
+		for _, pod := range allpods {
+			_, ok := pod.GetAnnotations()["nfs-check"]
+			if ok {
+				if nfspod.Spec.NodeName == pod.Spec.NodeName {
+					err := c.client.CoreV1().Pods(ns.Name).Delete(context.TODO(), pod.Name, metav1.DeleteOptions{})
+					if err != nil && errors.IsNotFound(err) {
+						log.Println(err)
+						return
+					}
+					fmt.Printf("%v %v pod已删除\n", ns.Name, pod.Name)
+				}
+			}
+		}
+	}
+
 }
 
 func (c *controller) checknode(ns []string) {
@@ -344,8 +361,8 @@ func (c *controller) checknode(ns []string) {
 					log.Println("node 更新失败")
 					return
 				}
-				count--
 				fmt.Printf("节点 %v 污点更新去除成功\n", nodeget.Name)
+				count--
 
 			} else if o.Key == "nfs-client-mount-error" && len(nodetaint) == 1 {
 				nodeget.Spec.Taints = nodetaint[:0]
@@ -354,8 +371,9 @@ func (c *controller) checknode(ns []string) {
 					log.Println("node更新失败")
 					return
 				}
-				count--
+
 				fmt.Printf("节点 %v 污点更新去除成功\n", nodeget.Name)
+				count--
 			} else if len(nodetaint) == 0 {
 				return
 			}
@@ -390,7 +408,10 @@ func (c *controller) process() bool {
 	}
 	defer c.queue.Done(item)
 	key := item.(string)
-	ns, err := c.syncnfs(key)
+	ns, nfspod, err := c.syncnfs(key)
+	if nfspod != nil {
+		c.syncbspod(nfspod)
+	}
 	if err != nil {
 		c.handleerr(key, err)
 	}
@@ -398,6 +419,7 @@ func (c *controller) process() bool {
 		time.Sleep(1 * time.Minute)
 		c.checknode(ns)
 	}
+
 	return true
 }
 
@@ -421,11 +443,12 @@ func (c *controller) podadd(obj interface{}) {
 	c.enqueue(obj)
 }
 
-func Newcontroller(client *kubernetes.Clientset, dsinformer dsinformer.DaemonSetInformer, podinformer coreinformer.PodInformer) controller {
+func Newcontroller(client *kubernetes.Clientset, dsinformer dsinformer.DaemonSetInformer, podinformer coreinformer.PodInformer, nsinformer coreinformer.NamespaceInformer) controller {
 	c := controller{
 		client:  client,
 		dslist:  dsinformer.Lister(),
 		podlist: podinformer.Lister(),
+		nslist:  nsinformer.Lister(),
 		queue:   workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter()),
 	}
 	//dsinformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{

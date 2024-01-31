@@ -30,7 +30,8 @@ func main() {
 	factory := informers.NewSharedInformerFactory(clientset, 0)
 	dsinformer := factory.Apps().V1().DaemonSets()
 	podinformer := factory.Core().V1().Pods()
-	newcontroller := pkg.Newcontroller(clientset, dsinformer, podinformer)
+	nsinformer := factory.Core().V1().Namespaces()
+	newcontroller := pkg.Newcontroller(clientset, dsinformer, podinformer, nsinformer)
 	_, err = clientset.AppsV1().DaemonSets("nfs-watch").Get(context.TODO(), "nfs-watch-ds", metav1.GetOptions{})
 	if errors.IsNotFound(err) {
 		err = newcontroller.DScreate()
