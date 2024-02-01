@@ -48,6 +48,20 @@ func resourceQuantityFromStr(capacity string) resource.Quantity {
 	return *quantity
 }
 
+// 是否大于一半节点数
+func (c *controller) nodecount() string {
+	nodelist, err := c.client.CoreV1().Nodes().List(context.TODO(), metav1.ListOptions{})
+	if err != nil {
+		log.Println(err)
+		return "节点清单未拿到"
+	}
+	if count > len(nodelist.Items)/2 {
+		log.Println("nfs宕机节点过半 需要进行手动切换")
+		return "false"
+	}
+	return "null"
+}
+
 // 回收资源
 func (c *controller) collection() {
 	ns, err := c.nslist.Get("nfs-watch")
@@ -231,7 +245,7 @@ func (c *controller) nfsdscreate() *apps.DaemonSet {
 						Command: []string{
 							"sh",
 							"-c",
-							"while true;do for i in {1..10};do echo $i > /data/nfs-test/test.txt && sleep 1;if [ $? -eq 1 ];then exit 1;fi;done;done",
+							"while true;do for i in {1..10000000};do echo $i > /data/nfs-test/test.txt && sleep 1;if [ $? -eq 1 ];then exit 1;fi;done;done",
 						},
 						VolumeMounts: []core.VolumeMount{
 							{
@@ -258,16 +272,6 @@ func (c *controller) nfsdscreate() *apps.DaemonSet {
 }
 
 func (c *controller) syncnfs(key string) ([]string, *core.Pod, error) {
-	//是否大于一半的节点数
-	nodelist, err := c.client.CoreV1().Nodes().List(context.TODO(), metav1.ListOptions{})
-	if err != nil {
-		log.Println(err)
-		return nil, nil, err
-	}
-	if count > len(nodelist.Items)/2 {
-		log.Println("nfs宕机节点过半 需要进行手动切换")
-		return nil, nil, nil
-	}
 	namespace, name, err := cache.SplitMetaNamespaceKey(key)
 	if err != nil {
 		log.Println(err)
@@ -462,6 +466,10 @@ func (c *controller) process() bool {
 	}
 	if ns != nil {
 		c.checknode(ns)
+	}
+	string := c.nodecount()
+	if string == "false" {
+		return false
 	}
 
 	return true
