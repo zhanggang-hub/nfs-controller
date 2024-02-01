@@ -5,6 +5,7 @@ import (
 	"fmt"
 	apps "k8s.io/api/apps/v1"
 	core "k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -47,6 +48,31 @@ func resourceQuantityFromStr(capacity string) resource.Quantity {
 	return *quantity
 }
 
+// 回收资源
+func (c *controller) collection() {
+	ns, err := c.nslist.Get("nfs-watch")
+	if err != nil && errors.IsNotFound(err) {
+		return
+	}
+	for i, _ := range ns.Labels {
+		if i == "delete" {
+			c.client.AppsV1().DaemonSets("nfs-watch").Delete(context.TODO(), "nfs-watch-ds", metav1.DeleteOptions{})
+			c.client.CoreV1().PersistentVolumeClaims("nfs-watch").Delete(context.TODO(), "nfs-watch-pvc", metav1.DeleteOptions{})
+			c.client.CoreV1().PersistentVolumes().Delete(context.TODO(), "nfs-watch-pv", metav1.DeleteOptions{})
+			c.client.StorageV1().StorageClasses().Delete(context.TODO(), "nfs-pro-class", metav1.DeleteOptions{})
+			delete(ns.Labels, "delete")
+			c.client.CoreV1().Namespaces().Update(context.TODO(), ns, metav1.UpdateOptions{})
+		} else if i == "create" {
+			err := c.nfscreate()
+			if err != nil && !errors.IsNotFound(err) {
+				log.Println(err)
+			}
+			delete(ns.Labels, "create")
+			c.client.CoreV1().Namespaces().Update(context.TODO(), ns, metav1.UpdateOptions{})
+		}
+	}
+}
+
 //func (c *controller) dsupdate(oldobj interface{}, newobj interface{}) {
 //	oldds := oldobj.(*apps.DaemonSet)
 //	newds := newobj.(*apps.DaemonSet)
@@ -56,35 +82,40 @@ func resourceQuantityFromStr(capacity string) resource.Quantity {
 //	return
 //}
 
-func (c *controller) DScreate() error {
-
-	_, err := c.dslist.DaemonSets("nfs-watch").Get("nfs-watch-ds")
+func (c *controller) nfscreate() error {
+	_, err := c.client.CoreV1().PersistentVolumes().Get(context.TODO(), "nfs-watch-pv", metav1.GetOptions{})
 	if err != nil && errors.IsNotFound(err) {
-		ns := c.namespace()
-		_, err := c.client.CoreV1().Namespaces().Create(context.TODO(), ns, metav1.CreateOptions{})
-		if err != nil {
-			log.Println(err)
-			return err
-		}
 		pv := c.pvcreate()
 		_, err = c.client.CoreV1().PersistentVolumes().Create(context.TODO(), pv, metav1.CreateOptions{})
 		if err != nil {
 			log.Println(err)
-			return err
 		}
+	}
+	_, err = c.client.CoreV1().PersistentVolumeClaims("nfs-watch").Get(context.TODO(), "nfs-watch-pvc", metav1.GetOptions{})
+	if err != nil && errors.IsNotFound(err) {
 		pvc := c.pvccreate()
 		_, err = c.client.CoreV1().PersistentVolumeClaims("nfs-watch").Create(context.TODO(), pvc, metav1.CreateOptions{})
 		if err != nil {
 			log.Println(err)
-			return err
 		}
+	}
+	_, err = c.client.AppsV1().DaemonSets("nfs-watch").Get(context.TODO(), "nfs-watch-ds", metav1.GetOptions{})
+	if err != nil && errors.IsNotFound(err) {
 		nfsds := c.nfsdscreate()
 		_, err = c.client.AppsV1().DaemonSets("nfs-watch").Create(context.TODO(), nfsds, metav1.CreateOptions{})
 		if err != nil {
 			log.Println(err)
-			return err
 		}
 	}
+	_, err = c.client.StorageV1().StorageClasses().Get(context.TODO(), "nfs-pro-class", metav1.GetOptions{})
+	if err != nil && errors.IsNotFound(err) {
+		sc := c.sccreate()
+		_, err = c.client.StorageV1().StorageClasses().Create(context.TODO(), sc, metav1.CreateOptions{})
+		if err != nil {
+			log.Println(err)
+		}
+	}
+
 	return nil
 }
 
@@ -92,6 +123,19 @@ func (c *controller) namespace() *core.Namespace {
 	ns := core.Namespace{}
 	ns.Name = "nfs-watch"
 	return &ns
+}
+
+func (c *controller) sccreate() *storagev1.StorageClass {
+	mode := storagev1.VolumeBindingImmediate
+	policy := core.PersistentVolumeReclaimPolicy("Retain")
+	b := true
+	sc := storagev1.StorageClass{}
+	sc.Name = "nfs-pro-class"
+	sc.Provisioner = "nfs-controller"
+	sc.VolumeBindingMode = &mode
+	sc.ReclaimPolicy = &policy
+	sc.AllowVolumeExpansion = &b
+	return &sc
 }
 
 func (c *controller) pvcreate() *core.PersistentVolume {
@@ -221,8 +265,8 @@ func (c *controller) syncnfs(key string) ([]string, *core.Pod, error) {
 		return nil, nil, err
 	}
 	if count > len(nodelist.Items)/2 {
-		log.Println("nfs宕机节点过多 需要进行自动切换")
-		//return nil, nil
+		log.Println("nfs宕机节点过半 需要进行手动切换")
+		return nil, nil, nil
 	}
 	namespace, name, err := cache.SplitMetaNamespaceKey(key)
 	if err != nil {
@@ -402,6 +446,7 @@ func (c *controller) work() {
 }
 
 func (c *controller) process() bool {
+	c.collection()
 	item, shutdown := c.queue.Get()
 	if shutdown {
 		return false
@@ -416,7 +461,6 @@ func (c *controller) process() bool {
 		c.handleerr(key, err)
 	}
 	if ns != nil {
-		time.Sleep(1 * time.Minute)
 		c.checknode(ns)
 	}
 
@@ -443,6 +487,17 @@ func (c *controller) podadd(obj interface{}) {
 	c.enqueue(obj)
 }
 
+func (c *controller) nsupdate(obj interface{}, obj2 interface{}) {
+	if reflect.DeepEqual(obj, obj2) {
+		return
+	}
+	c.enqueue(obj2)
+}
+
+func (c *controller) nsadd(obj interface{}) {
+	c.enqueue(obj)
+}
+
 func Newcontroller(client *kubernetes.Clientset, dsinformer dsinformer.DaemonSetInformer, podinformer coreinformer.PodInformer, nsinformer coreinformer.NamespaceInformer) controller {
 	c := controller{
 		client:  client,
@@ -457,6 +512,11 @@ func Newcontroller(client *kubernetes.Clientset, dsinformer dsinformer.DaemonSet
 	podinformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		UpdateFunc: c.podupdate,
 		AddFunc:    c.podadd,
+	})
+
+	nsinformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+		UpdateFunc: c.nsupdate,
+		AddFunc:    c.nsadd,
 	})
 
 	return c
