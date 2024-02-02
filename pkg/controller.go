@@ -167,8 +167,8 @@ func (c *controller) pvcreate() *core.PersistentVolume {
 		},
 		PersistentVolumeSource: core.PersistentVolumeSource{
 			NFS: &core.NFSVolumeSource{
-				Path:   "/data11",
-				Server: "192.168.40.130",
+				Path:   "/data/nfsdata",
+				Server: "10.182.0.34",
 			},
 		},
 	}
@@ -230,7 +230,7 @@ func (c *controller) nfsdscreate() *apps.DaemonSet {
 									MatchExpressions: []core.NodeSelectorRequirement{
 										{
 											Key:      "node-role.kubernetes.io/control-plane",
-											Operator: "Exists",
+											Operator: "DoesNotExist",
 										},
 									},
 								},
@@ -354,32 +354,40 @@ func (c *controller) syncnfs(key string) ([]string, *core.Pod, error) {
 	return nil, nil, nil
 }
 func (c *controller) syncbspod(nfspod *core.Pod) {
-	allns, err := c.nslist.List(labels.Everything())
-	if err != nil {
+	_, err := c.podlist.Pods(nfspod.Namespace).Get(nfspod.Name)
+	if err != nil && errors.IsNotFound(err) {
 		log.Println(err)
 		return
 	}
-	for _, ns := range allns {
-		allpods, err := c.podlist.Pods(ns.Name).List(labels.Everything())
+	phase := nfspod.Status.Phase
+	containerready := nfspod.Status.ContainerStatuses[0].Ready
+	if phase == "Running" && !containerready {
+		allns, err := c.nslist.List(labels.Everything())
 		if err != nil {
 			log.Println(err)
 			return
 		}
-		for _, pod := range allpods {
-			_, ok := pod.GetAnnotations()["nfs-check"]
-			if ok {
-				if nfspod.Spec.NodeName == pod.Spec.NodeName {
-					err := c.client.CoreV1().Pods(ns.Name).Delete(context.TODO(), pod.Name, metav1.DeleteOptions{})
-					if err != nil && errors.IsNotFound(err) {
-						log.Println(err)
-						return
+		for _, ns := range allns {
+			allpods, err := c.podlist.Pods(ns.Name).List(labels.Everything())
+			if err != nil {
+				log.Println(err)
+				return
+			}
+			for _, pod := range allpods {
+				_, ok := pod.GetAnnotations()["nfs-check"]
+				if ok {
+					if nfspod.Spec.NodeName == pod.Spec.NodeName {
+						err := c.client.CoreV1().Pods(ns.Name).Delete(context.TODO(), pod.Name, metav1.DeleteOptions{})
+						if err != nil && errors.IsNotFound(err) {
+							log.Println(err)
+							return
+						}
+						fmt.Printf("%v %v pod已删除\n", ns.Name, pod.Name)
 					}
-					fmt.Printf("%v %v pod已删除\n", ns.Name, pod.Name)
 				}
 			}
 		}
 	}
-
 }
 
 func (c *controller) checknode(ns []string) {
@@ -427,6 +435,7 @@ func (c *controller) checknode(ns []string) {
 			}
 		}
 	}
+
 }
 
 func (c *controller) enqueue(obj interface{}) {
@@ -458,7 +467,9 @@ func (c *controller) process() bool {
 	defer c.queue.Done(item)
 	key := item.(string)
 	ns, nfspod, err := c.syncnfs(key)
+
 	if nfspod != nil {
+		time.Sleep(20 * time.Second)
 		c.syncbspod(nfspod)
 	}
 	if err != nil {
