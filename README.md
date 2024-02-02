@@ -13,4 +13,4 @@
 3.当集群的nfs宕机节点超过一半数量后，controller会夯死，需要手动回收污点以及pod。
 
 
-       ※使用时需要更新nfs ip以及path
+       ※使用时需要更新nfs ip以及path。
