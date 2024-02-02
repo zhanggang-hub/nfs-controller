@@ -4,7 +4,7 @@
        ※对nfs-watch命名空间进行 label操作 label为create=true 会自动创建相关监控nfs资源，delete=true 会删除相关监控nfs资源。
 
 
-2.对需要监控的pod打一个annotations,为annotation: nfs-chexk: "true"。
+2.对需要监控的pod打一个annotations,为annotation: nfs-check: "true"。
 
 
        ※当此节点的nfs连接失败，daemonset的检测pod失败后，controller会监听到pod事件变化，给此节点打禁止调度污点。20s后判断再次判断检测pod，失败后删除被监控pod完成驱逐。
