@@ -476,6 +476,7 @@ func (c *controller) process() bool {
 		c.handleerr(key, err)
 	}
 	if ns != nil {
+		time.Sleep(20 * time.Second)
 		c.checknode(ns)
 	}
 	string := c.nodecount()
