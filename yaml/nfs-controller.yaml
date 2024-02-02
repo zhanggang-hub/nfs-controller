@@ -1,0 +1,95 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  labels:
+    kubernetes.io/metadata.name: nfs-watch
+  name: nfs-watch
+spec:
+  finalizers:
+  - kubernetes
+status:
+  phase: Active
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: nfs-controller-sa
+  namespace: nfs-watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: nfs-controller-role
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  - nodes
+  - persistentvolumeclaims
+  - persistentvolumes
+  - namespaces
+  verbs:
+  - create
+  - list
+  - watch
+  - update
+  - delete
+  - get
+- apiGroups:
+  - apps
+  resources:
+  - daemonsets
+  verbs:
+  - create
+  - list
+  - watch
+  - update
+  - delete
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  creationTimestamp: null
+  name: nfs-controller-rb
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: nfs-controller-role
+subjects:
+- kind: ServiceAccount
+  name: nfs-controller-sa
+  namespace: nfs-watch
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: nfs-controller
+  name: nfs-controller
+  namespace: nfs-watch
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nfs-controller
+  template:
+    metadata:
+      labels:
+        app: nfs-controller
+    spec:
+      serviceAccountName: nfs-controller-sa
+      containers:
+      - image: nfs-controller:v1
+        name: nfs-controller-con
+        resources:
+          requests: 
+            cpu: 10m
+            memory: 10Mi
+          limits:
+            cpu: 12m
+            memory: 100Mi
+      tolerations:
+      - operator: "Exists"
