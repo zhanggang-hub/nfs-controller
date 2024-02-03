@@ -167,8 +167,8 @@ func (c *controller) pvcreate() *core.PersistentVolume {
 		},
 		PersistentVolumeSource: core.PersistentVolumeSource{
 			NFS: &core.NFSVolumeSource{
-				Path:   "/data/nfsdata",
-				Server: "10.182.0.34",
+				Path:   "/data11",
+				Server: "192.168.40.130",
 			},
 		},
 	}
@@ -230,7 +230,7 @@ func (c *controller) nfsdscreate() *apps.DaemonSet {
 									MatchExpressions: []core.NodeSelectorRequirement{
 										{
 											Key:      "node-role.kubernetes.io/control-plane",
-											Operator: "DoesNotExist",
+											Operator: "Exists",
 										},
 									},
 								},
@@ -306,6 +306,10 @@ func (c *controller) syncnfs(key string) ([]string, *core.Pod, error) {
 				if err != nil {
 					log.Println(err)
 					return nil, nil, err
+				}
+				string := c.nodecount()
+				if string == "false" {
+					return ns, nil, nil
 				}
 				taint := &core.Taint{
 					Key:    "nfs-client-mount-error",   // 污点的键，可以根据需要进行自定义设置
@@ -478,10 +482,6 @@ func (c *controller) process() bool {
 	if ns != nil {
 		time.Sleep(20 * time.Second)
 		c.checknode(ns)
-	}
-	string := c.nodecount()
-	if string == "false" {
-		return false
 	}
 
 	return true
