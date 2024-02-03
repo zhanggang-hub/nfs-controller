@@ -53,7 +53,7 @@ func (c *controller) nodecount() string {
 	nodelist, err := c.client.CoreV1().Nodes().List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		log.Println(err)
-		return "节点清单未拿到"
+		return "节点清单未拿到\n"
 	}
 	if count > len(nodelist.Items)/2 {
 		log.Println("nfs宕机节点过半 需要进行手动切换")
