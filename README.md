@@ -8,7 +8,7 @@
 
 
        ※当此节点的nfs连接失败，daemonset的检测pod失败后，controller会监听到pod事件变化，给此节点打禁止调度污点。20s后判断再次判断检测pod，失败后删除被监控pod完成驱逐。
-
+       
 
 3.当集群的nfs宕机节点超过一半数量后，认为nfs server宕机，controller会夯死，等待nfs server恢复后，重启controller pod即可。
 
