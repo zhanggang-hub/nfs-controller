@@ -20,12 +20,14 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
 	"log"
+	"nfs-controller/backup"
 	"reflect"
 	"strconv"
 	"time"
 )
 
 var count int
+var pnpvcn map[string]string
 
 type controller struct {
 	client  *kubernetes.Clientset
@@ -307,8 +309,9 @@ func (c *controller) syncnfs(key string) ([]string, *core.Pod, error) {
 					log.Println(err)
 					return nil, nil, err
 				}
-				string := c.nodecount()
-				if string == "false" {
+				//提前判断是否大于一半污点(pod是否不正常，pod状态改变会丢进queue),是的话直接返回name+ns,走去污点判断.
+				strings := c.nodecount()
+				if strings == "false" {
 					return ns, nil, nil
 				}
 				taint := &core.Taint{
@@ -394,11 +397,11 @@ func (c *controller) syncbspod(nfspod *core.Pod) {
 	}
 }
 
-func (c *controller) checknode(ns []string) {
+func (c *controller) checknode(ns []string) bool {
 	podget, err := c.podlist.Pods(ns[0]).Get(ns[1])
 	if err != nil {
 		log.Println(err)
-		return
+		return false
 	}
 	podphase := podget.Status.Phase
 	containerready := podget.Status.ContainerStatuses[0].Ready
@@ -406,7 +409,7 @@ func (c *controller) checknode(ns []string) {
 		nodeget, err := c.client.CoreV1().Nodes().Get(context.TODO(), podget.Spec.NodeName, metav1.GetOptions{})
 		if err != nil {
 			log.Println("node is not found--")
-			return
+			return false
 		}
 		//检测节点是否有其他驱逐污点
 		nodetaint := nodeget.Spec.Taints
@@ -419,26 +422,72 @@ func (c *controller) checknode(ns []string) {
 				_, err = c.client.CoreV1().Nodes().Update(context.TODO(), nodeget, metav1.UpdateOptions{})
 				if err != nil {
 					log.Println("node 更新失败")
-					return
+					return false
 				}
 				fmt.Printf("节点 %v 污点更新去除成功\n", nodeget.Name)
 				count--
+				return true
 
 			} else if o.Key == "nfs-client-mount-error" && len(nodetaint) == 1 {
 				nodeget.Spec.Taints = nodetaint[:0]
 				_, err = c.client.CoreV1().Nodes().Update(context.TODO(), nodeget, metav1.UpdateOptions{})
 				if err != nil {
 					log.Println("node更新失败")
-					return
+					return false
 				}
 
 				fmt.Printf("节点 %v 污点更新去除成功\n", nodeget.Name)
 				count--
+				return true
 			} else if len(nodetaint) == 0 {
-				return
+				return true
 			}
 		}
 	}
+	return false
+}
+
+// 当超过一半节点时触发备份pv+pvc
+func (c *controller) backuptorecovery() {
+	strings := c.nodecount()
+	if strings == "false" {
+		allns, err := c.nslist.List(labels.Everything())
+		if err != nil {
+			log.Println(err)
+			return
+		}
+		for _, ns := range allns {
+			allpods, err := c.podlist.Pods(ns.Name).List(labels.Everything())
+			if err != nil {
+				log.Println(err)
+				return
+			}
+			for _, pod := range allpods {
+				_, ok := pod.GetAnnotations()["backup-recovery"]
+				if ok {
+					pvcname := pod.Spec.Volumes[0].PersistentVolumeClaim.ClaimName
+					pvcget, err := c.client.CoreV1().PersistentVolumeClaims(pod.Namespace).Get(context.TODO(), pvcname, metav1.GetOptions{})
+					if err != nil {
+						fmt.Printf("pvc %v查询失败", pvcname)
+					}
+					//记录pod和旧pvc关系
+					_, ok = pnpvcn[pod.Name]
+					if !ok {
+						pnpvcn[pod.Name] = pvcget.Name
+					}
+					pvget, err := c.client.CoreV1().PersistentVolumes().Get(context.TODO(), pvcget.Spec.VolumeName, metav1.GetOptions{})
+					if err != nil {
+						fmt.Printf("pv %v查询失败", pvcget.Spec.VolumeName)
+					}
+					//创建备份pv、pvc等待切换
+					backup.Backuppvc(pvget, pvcget)
+				}
+			}
+		}
+	}
+}
+
+func (c *controller) pvc2create() {
 
 }
 
